@@ -68,9 +68,6 @@ The most important structure is:
 ```text
 agenticAI/
 ├── README.md
-├── blueprint
-├── 代码实现详解.md
-├── Agent系统核心说明_双语.md
 ├── agent_core/
 │   ├── bootstrap.py
 │   ├── schemas.py
