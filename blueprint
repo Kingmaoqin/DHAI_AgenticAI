@@ -1,0 +1,697 @@
+现在对于Xinyu，我想建立一个通用的他负责部分的agentic框架，你觉得应该怎么设计？可以接下来对接多种不同的任务，设计的比较general，以后可以方便改进介入任何task（对xinyu的部分思考就行了），并且给出详细的实现路径和方法，我将在我的4*A100上面进行操作
+
+我会把 Xinyu 这部分单独抽象成一个可迁移的 agentic core，再结合当前比较稳的 agent 架构实践，给你一个能长期复用的实现路径。
+
+Thought for 18s
+
+可以。对于 Xinyu 负责的部分，我建议不要把它设计成“某个赛道专用 agent”，而是设计成一个 task-agnostic orchestration core，也就是一个可迁移的 agentic 中枢。它的职责不是亲自完成所有感知和计算，而是负责 理解任务、分解步骤、选择工具、维护状态、做中间校验、汇总证据、生成最终输出。这类设计和当前比较稳的 agent 实践是一致的：先用一个增强型 LLM 作为核心，再围绕它加上 retrieval、tools、memory、guardrails 和 tracing；复杂性优先通过工作流和模块化来管理，而不是一上来做很多平行 agent。Anthropic 将 augmented LLM 视为 agentic system 的基本构件，并强调 prompt chaining 与程序化检查；OpenAI 也把 orchestration 定义为多步、工具调用、handoffs、guardrails 和 context 管理，并建议在复杂场景中用清晰的 primitives 和 tracing。
+
+我下面给你的，不只是 FieldWorkArena 可用，而是以后你切换到 Finance Agent、research agent、medical digital twin、multimodal inspection、benchmark automation，Xinyu 这部分都能继续复用，只需要换 task plugins 和 tools。
+
+1. 先定清楚 Xinyu 这部分到底负责什么
+
+我建议把 Xinyu 的部分定义为：
+
+General Agentic Orchestration Layer
+
+它只做六件事。
+
+第一，task interpretation。接收用户问题或 benchmark query，识别任务类型、输入模态、约束条件、输出格式、评价重点。
+
+第二，planning and decomposition。把任务拆成一系列受控步骤，而不是让模型端到端自由发挥。
+
+第三，tool routing。决定什么时候调用 retrieval、vision、table parsing、video reasoning、calculator、external API、report generator 等模块。
+
+第四，state management。维护结构化工作记忆，包括当前 hypothesis、已收集证据、待验证变量、失败原因、预算消耗、最终结论。
+
+第五，verification and control。在关键中间节点做程序化检查，防止 tool hallucination、单位错误、格式错误、证据不足。
+
+第六，answer synthesis。把前面得到的中间证据转成 benchmark-compatible 或 user-compatible 输出。
+
+这个职责边界很重要。因为像 FieldWorkArena 这类 benchmark 的难点，不只是感知能力，而是 agent 要能根据任务选择并编排 planning / perception / action 工具链，而不是单纯“看图回答”。论文里明确强调 agents must make reasoned choices about which tools to use and how to sequence them，而不是执行预定义脚本。
+
+所以 Xinyu 的系统本质上是 brain + workflow controller + state manager + safety layer，不是某个具体 detector。
+
+2. 最推荐的总体架构：单主代理 + 可插拔技能层 + 显式状态机
+2.1 为什么不是一开始就做多 agent
+
+我不建议你一上来就做很多对等 agent。更稳的做法是：
+
+one primary orchestrator + multiple typed skills/modules
+
+原因有三个。
+
+第一，当前比较成熟的建议都强调：复杂性应该按需增加，而不是预设很多 agent。Anthropic 明确提醒 framework 和复杂架构很容易带来额外抽象和 debug 困难，很多模式直接用 LLM API 就能实现；OpenAI 也强调 multi-agent 不是默认选择，而是当任务边界高度分离、指令特别长、工具特别多时才值得引入。
+
+第二，对你这种要支持多任务迁移的情况，真正通用的不是“多个 agent 身份”，而是一个统一的 orchestration substrate。以后你加 task，只需要加 skill adapters 和 task schemas，不需要重构所有 agent 协作逻辑。
+
+第三，在 4×A100 条件下，真正消耗算力的通常是 vision/video models、reranking、embedding、vLLM serving、多样本自一致性，而不是 orchestrator 本身。所以系统重点应该先放在 可靠控制流 和 模块接入规范。
+
+2.2 我建议的三层结构
+第一层：Orchestration Core
+
+这是 Xinyu 的主系统。
+
+包含：
+
+Intent parser
+Task classifier
+Planner
+Router
+State store
+Verifier
+Finalizer
+Trace logger
+第二层：Skill Layer
+
+这是可插拔能力层。
+
+每个 skill 都暴露统一接口，比如：
+
+name
+input_schema
+output_schema
+cost_profile
+latency_profile
+failure_modes
+validator
+
+skills 可以是：
+
+RAG search
+PDF/doc parser
+OCR
+table extractor
+image detector
+video tracker
+geometry engine
+Python calculator
+SQL/graph query
+report generator
+code runner
+eval tool
+第三层：Task Policy Layer
+
+这是任务适配层，不是单独 agent。
+
+它只保存：
+
+某类任务怎么分解
+哪些 skills 优先
+哪些检查必须做
+输出格式模板
+score-sensitive constraints
+
+例如：
+
+FieldWorkArena policy
+Finance OfficeQA policy
+Research benchmark policy
+Medical inspection policy
+
+这样以后换任务时，Xinyu 的 core 不需要重写，只换 task policy 和可选 skills。
+
+3. 最关键设计：把“agent”做成显式状态机，而不是纯 prompt loop
+
+我建议你的核心不是“一个 while tool-call loop”，而是 state machine + planner loop。
+
+3.1 推荐状态
+
+至少定义这些状态：
+
+INIT
+PARSE_TASK
+CLASSIFY_TASK
+SELECT_POLICY
+BUILD_PLAN
+EXECUTE_STEP
+CHECK_STEP
+REPLAN
+AGGREGATE_EVIDENCE
+FINAL_VERIFY
+FORMAT_OUTPUT
+DONE
+FAIL
+3.2 为什么一定要状态机
+
+因为通用 agent 最大的问题不是答错一次，而是：
+
+不知道自己目前在哪一步
+中间证据污染上下文
+tool 调用过多
+一旦失败就整条链崩掉
+无法做 regression debugging
+
+显式状态机的好处是：
+
+每个状态有明确输入输出
+每一步可以记录 artifacts
+可以局部重跑
+可以做 deterministic checks
+容易支持长任务和 benchmark 批量跑
+
+这和当前 agent orchestration 的主流思路一致：把 agent 的复杂性从“prompt 魔法”转移到“control flow + traceability”。OpenAI 的 orchestration 文档也把 control-flow logic、guardrails、session/context 和 tracing 作为核心基础。
+
+4. Xinyu 这部分最值得做成通用能力的五个模块
+A. Task Understanding Engine
+
+这个模块负责把任何输入统一转成一个标准任务对象 TaskSpec。
+
+输出字段建议
+task_id
+raw_query
+task_domain
+task_family
+input_modalities
+required_outputs
+success_criteria
+hard_constraints
+estimated_difficulty
+budget_hint
+作用
+
+它把“用户一句话”变成 agent 能执行的结构化目标。
+
+例如：
+
+这是文档类还是多模态类
+是 extraction、comparison、classification、decision、reporting 还是 long-horizon task
+输出需要 JSON 还是自由文本
+需要 numeric accuracy 吗
+是否必须引用证据
+
+以后接任何任务，这一层都通用。
+
+B. Planning Engine
+
+这个模块做的不是自由链式思考，而是生成 PlanGraph。
+
+PlanGraph 节点建议
+
+每个 node 包含：
+
+step_id
+goal
+required_inputs
+candidate_skills
+selected_skill
+expected_artifact
+verification_rule
+fallback_rule
+为什么要 graph 而不是简单 list
+
+因为实际任务经常有：
+
+分支
+回退
+并行可选步骤
+证据不足后的重规划
+
+对于长任务尤其重要。
+
+规划策略建议
+
+开始先用两层规划：
+
+coarse plan：3–8 个高层步骤
+fine plan：每一步执行前再局部细化
+
+这样比一口气生成 20 步更稳，因为后面信息会更新。
+
+Anthropic 提到 prompt chaining 时，也强调每一步处理前一步输出，并在中间加程序化 gate。你的 fine planning 就是这个思想的工程化版本。
+
+C. Skill Router
+
+这是整个系统最关键的一层。
+
+它负责什么
+给定当前 step，挑哪一个 skill
+决定是否要 ensemble
+决定是否要先 cheap skill 再 expensive skill
+决定何时停止继续搜证
+推荐路由逻辑
+
+不是完全靠 LLM 决策。应该做成：
+
+LLM proposal + rule-based arbitration + cost-aware scheduler
+
+也就是：
+
+LLM 提议最合适的 skill 或顺序
+程序根据 modality / schema / budget / tool availability 做过滤
+scheduler 决定实际执行
+为什么
+
+这样你以后接不同任务时不会出现：
+
+LLM 随便调错工具
+贵的模型被滥用
+视频任务走纯文本工具
+structured output 任务忘记 verifier
+
+OpenAI 文档里提到多 agent / 多工具场景下要 separation of concerns，避免一个 agent 拿太多相似工具而混淆。你这里用 typed router 而不是直接多 agent，也是在做同一件事。
+
+D. State and Memory System
+
+这部分必须认真做，因为通用 agent 的生命线就是上下文管理。
+
+我建议分三类 memory
+1. Run State
+
+当前任务执行态，短生命周期。
+存：
+
+current step
+current plan
+pending questions
+selected tools
+intermediate artifacts
+remaining budget
+2. Episodic Memory
+
+任务级历史，可供 few-shot retrieval。
+存：
+
+相似任务
+以前成功的 plan
+常见失败模式
+debug traces
+3. Procedural Memory
+
+长期稳定知识。
+存：
+
+task policies
+tool manuals
+output schemas
+verifier rules
+prompt templates
+存储实现建议
+Run state：Redis / in-memory object + periodic checkpoint
+Episodic memory：Postgres + vector DB
+Procedural memory：Git versioned YAML / JSON + docs index
+
+不要把所有东西都塞进 prompt。Anthropic 在 context engineering 里专门讨论过长时程 agent 的 context pollution，建议通过 structured note-taking、compaction 等方式管理上下文。虽然那篇是更长时程场景，但原则完全适用。
+
+E. Verification Layer
+
+如果你真想让这个框架能介入任何 task，这层必须从一开始就有。
+
+verifier 不是一个模型重答一遍
+
+更好的做法是 typed verifiers
+
+至少做四类：
+
+1. Schema verifier
+
+检查输出字段齐不齐，类型对不对，JSON 能不能 parse。
+
+2. Evidence verifier
+
+检查最终结论是否绑定到足够证据。
+比如 decision 不能没有 observation / source。
+
+3. Numeric verifier
+
+检查单位、一致性、数量级、边界条件。
+
+4. Process verifier
+
+检查某类任务是否跳过了必经步骤。
+例如 FieldWorkArena 某类问题不能直接答，必须先 rule extraction 再 scene analysis。
+
+这类 guardrails 在实践里很关键。OpenAI 的 building agents 文档和 practical guide 都把 guardrails、predictability、traceability 作为 agent 落地基础。
+
+5. 面向多任务的通用接口设计
+
+如果你以后要“方便介入任何 task”，那你真正需要的是规范化 I/O。
+
+5.1 通用任务对象
+class TaskSpec(BaseModel):
+    task_id: str
+    raw_query: str
+    domain: str
+    family: str
+    modalities: list[str]
+    constraints: dict
+    output_schema: dict
+    eval_focus: list[str]
+    budget: dict
+5.2 通用步骤对象
+class PlanStep(BaseModel):
+    step_id: str
+    goal: str
+    inputs_needed: list[str]
+    candidate_skills: list[str]
+    selected_skill: str | None = None
+    expected_artifact: str
+    verifier: str | None = None
+    status: str = "pending"
+5.3 通用 artifact 对象
+class Artifact(BaseModel):
+    artifact_id: str
+    type: str
+    producer: str
+    content: dict
+    confidence: float | None = None
+    provenance: dict = {}
+5.4 通用执行记录对象
+class TraceEvent(BaseModel):
+    time: str
+    state: str
+    action: str
+    input_ref: list[str]
+    output_ref: list[str]
+    latency_ms: int
+    cost: float | None = None
+    success: bool
+    note: str | None = None
+
+你一旦把这些定好，以后接任务就是：
+
+加新的 task policy
+加新的 skills
+加新的 verifier
+不需要重写 Xinyu 的 core
+6. 实现路径：按 4×A100 的现实条件来做
+
+下面是我建议的详细实施路线。
+
+Phase 0：先做最小可运行骨架（1 周）
+
+目标：不要先接模型堆栈，先把 orchestration core 骨架立起来。
+
+你先实现：
+
+FastAPI 服务
+TaskSpec parser
+state machine runner
+PlanGraph 数据结构
+skill registry
+trace logger
+artifact store
+verifier interface
+
+这一步只用 mock skills：
+
+mock_retriever
+mock_vision
+mock_calculator
+mock_reporter
+
+确保系统能完整走：
+input -> parse -> plan -> execute -> verify -> output
+
+技术栈建议
+Python 3.11+
+FastAPI
+Pydantic
+Redis
+Postgres
+SQLAlchemy
+Celery / Ray（后期二选一）
+Langfuse / OpenTelemetry / 自定义 tracing
+
+这一步先别纠结用哪个 agent framework。Anthropic 明确提醒很多 framework 会遮蔽底层行为；如果你要做通用框架，前期自己掌控控制流更重要。
+
+Phase 1：接入核心 LLM orchestration（1–2 周）
+
+这一步你要做的是把 planner、router、summarizer、replanner 接到真正模型。
+
+我的建议
+
+用自己的 orchestration code + model API
+而不是把整个系统完全绑死在某个现成 framework 上。
+
+原因：
+
+你要做的是可研究、可扩展的 general core
+你需要完全掌控状态和路由
+以后不同比赛和项目切换会更灵活
+
+但是你可以借鉴 OpenAI Agents SDK 的 primitives 概念：
+
+agent
+handoff
+guardrail
+session
+tracing
+模型分工建议
+Planner / Replanner：高推理模型
+Router / Formatter：中等模型
+Cheap classifier / schema repair：轻量模型
+
+这样可以控成本和延迟。
+
+Phase 2：建立 Skill Registry 和 Plugin System（1–2 周）
+
+这是“通用性”的关键。
+
+每个 skill 插件都要有统一目录结构：
+
+skills/
+  retrieval/
+    plugin.py
+    schema.py
+    validator.py
+    tests.py
+    config.yaml
+  vision_detection/
+  video_reasoning/
+  calculator/
+  report_writer/
+每个 plugin 要暴露
+can_handle(task_step)
+run(inputs)
+validate(output)
+estimate_cost(inputs)
+estimate_latency(inputs)
+fallbacks()
+分类建议
+Lightweight deterministic skills
+calculator
+parser
+regex/schema validator
+geometry engine
+LLM-mediated skills
+query rewrite
+evidence summarization
+report composition
+Heavy ML skills
+detector
+tracker
+OCR
+reranker
+multimodal scene analyzer
+
+以后接任何新任务，只是在 registry 里多挂一个 plugin。
+
+Phase 3：把 4×A100 用起来，形成真正可扩展的 inference fabric（2–3 周）
+
+这是你最关心的部分。
+
+推荐 GPU 分配策略
+GPU 0：Primary LLM serving / reasoning
+
+用于 planner、replanner、complex summarizer。
+如果你本地部署开源推理模型，这块给主 reasoning model。
+
+GPU 1：Multimodal perception
+
+跑 image model、video feature extractor、VLM inference、OCR-heavy vision。
+
+GPU 2：Retrieval + reranking + embedding + auxiliary LLM
+
+跑 embedding model、cross-encoder reranker、小模型 classifier、schema repair model。
+
+GPU 3：Experiment / verifier / batch eval
+
+跑 self-consistency、ablation、shadow evaluation、stress test，或者作为弹性池。
+
+为什么这样分
+
+因为 orchestrator 本身不太吃 GPU，真正吃资源的是：
+
+多模态感知
+reranking
+long-context local serving
+batch eval
+
+所以不要四张卡都拿来堆主模型。更好的方式是让整套 agent pipeline 各模块并行。
+
+serving 建议
+vLLM 用于本地大模型 serving
+Triton / SGLang 可选
+Redis 队列做异步 job 派发
+每个重技能模块单独微服务
+并发策略
+planner 和 skills 异步
+independent evidence gathering 并行
+verification 串行收口
+
+这样比全流程串行快很多。
+
+7. 推荐的执行循环
+
+我建议执行时采用下面这个 loop：
+
+parse input into TaskSpec
+classify task family and select TaskPolicy
+generate coarse plan
+for each step:
+select skill candidates
+run cheapest sufficient skill first
+collect artifact
+run typed verifier
+if failed: retry / escalate / replan
+aggregate artifacts
+final consistency check
+format final output
+save full trace and memory summary
+关键细节
+每一步结束都生成一个 compact state summary
+不把整段 raw context 无限制往后传
+大 artifact 只存引用，不直接塞上下文
+最终答案必须引用 artifacts ids
+
+这类设计对长任务尤其重要，否则后期 context 容易脏掉。
+
+8. 针对 FieldWorkArena，Xinyu 的 core 应该如何对接
+
+虽然你问的是 general 设计，但我顺带说一下这个 core 如何落到你当前任务。
+
+FieldWorkArena 的核心是 planning / perception / action 三类 action space，并且很多题要根据文档、视频、图像、几何计算和 reporting 联合完成。
+
+所以对这个任务，Xinyu 的 core 不应该自己做 detector，而应该：
+
+把 query 转成 task_family
+选 policy：planning / perception / action / mixed
+生成 steps
+调 perception plugins 和 rule extraction plugins
+用 verifier 检查证据和数值
+输出 structured report
+
+也就是说，Xinyu 负责的是 general reasoning shell，别人的部分是 domain skill executors。这正好适合团队协作。
+
+9. 评测与改进体系：这是通用 agent 框架能长期进化的关键
+
+如果你真想以后接任何任务，必须从第一版开始做 eval-first。
+
+建议建三个评测面板
+A. Task-level metrics
+success rate
+exact / semantic match
+structured output validity
+numeric consistency
+B. Process-level metrics
+average steps per task
+tool-call count
+replan rate
+verifier fail rate
+hallucinated tool selection rate
+C. System-level metrics
+latency
+GPU utilization
+token cost
+failure distribution by state
+再做一个 error taxonomy
+
+比如：
+
+parsing failure
+misrouting
+bad plan
+skill failure
+evidence insufficiency
+aggregation failure
+formatting failure
+
+OpenAI practical guide 也强调 design foundations、guardrails 和 predictability，而不是只看最终答案。
+
+10. 你可以直接照着做的目录结构
+agent_core/
+  app/
+    main.py
+    api.py
+  core/
+    state_machine.py
+    planner.py
+    router.py
+    verifier.py
+    finalizer.py
+    memory.py
+    trace.py
+  schemas/
+    task_spec.py
+    plan_step.py
+    artifact.py
+    trace_event.py
+  policies/
+    base_policy.py
+    fieldwork_policy.py
+    finance_policy.py
+    research_policy.py
+  skills/
+    registry.py
+    retrieval/
+    calculator/
+    vision_detection/
+    video_reasoning/
+    report_writer/
+  services/
+    llm_service.py
+    embedding_service.py
+    rerank_service.py
+    storage_service.py
+  eval/
+    harness.py
+    metrics.py
+    regression_suite.py
+  configs/
+    models.yaml
+    routing.yaml
+    budgets.yaml
+11. 我最推荐你现在先做的最小 MVP
+
+别一开始做全套。先做这个版本：
+
+MVP-v1
+一个 primary orchestrator
+三个 mock task policies
+四个 skills：retrieval, calculator, parser, report_writer
+一个 verifier：schema + evidence
+一个 trace dashboard
+
+然后再扩到：
+
+MVP-v2
+加 vision_detection
+加 video_reasoning
+加 numeric verifier
+加 episodic memory
+加 parallel skill execution
+
+再到：
+
+MVP-v3
+policy learning / automatic routing improvement
+reusable benchmark harness
+self-reflection only on failure
+active skill selection under budget
+12. 最后的设计结论
+
+如果只用一句话概括，我会建议你把 Xinyu 负责的部分设计成：
+
+一个显式状态机驱动的通用 agent orchestration core，它以 TaskSpec 为输入，以结构化 artifacts 和 traced execution 为中间表示，以 typed skills 为执行能力，以 verifiers 为稳定器，以 task policies 为迁移接口。
+
+这样的好处是：
+
+对 FieldWorkArena 适配自然
+对未来任何任务都容易插入
+不依赖单一 benchmark
+易于用 4×A100 做模块并行
+易于 debug、复现、做论文或比赛分析
+后续再加多 agent 也有清晰基础
+
+下一步我可以直接给你一份 更具体的工程蓝图：包括每个 Python 文件该写什么类、每个模块的伪代码、4×A100 上的部署方式、以及第一周到第四周的实施时间表。
