@@ -286,7 +286,39 @@ class ReportWriterSkill(Skill):
             content=content,
             confidence=0.9,
         )
+    
+class UnitNormalizerSkill(Skill):
+    name = "unit_normalizer"
+    description = "Converts financial text values like '$1.2 billion' to plain floats."
+    supported_artifacts = ("normalized_value",)
 
+    def can_handle(self, step: PlanStep, task_spec: TaskSpec, run_state: RunState) -> bool:
+        return step.expected_artifact == "normalized_value"
+
+    def run(self, step: PlanStep, task_spec: TaskSpec, run_state: RunState) -> Artifact:
+        parsed = _latest_artifact(run_state, "parsed_query")
+        raw_text = parsed.content.get("retrieval_query", "") if parsed else ""
+        value = self._normalize(raw_text)
+        return Artifact(
+            artifact_id=f"artifact-{uuid.uuid4().hex[:8]}",
+            type="normalized_value",
+            producer=self.name,
+            content={"raw": raw_text, "value": value},
+            confidence=1.0,
+        )
+
+    def _normalize(self, text: str) -> float:
+        text = text.strip().lower().replace(",", "").replace("$", "")
+        if "%" in text:
+            return float(re.sub(r"[^\d.]", "", text)) / 100
+        if "trillion" in text or text.endswith("t"):
+            return float(re.sub(r"[^\d.]", "", text)) * 1_000_000_000_000
+        if "billion" in text or text.endswith("b"):
+            return float(re.sub(r"[^\d.]", "", text)) * 1_000_000_000
+        if "million" in text or text.endswith("m"):
+            return float(re.sub(r"[^\d.]", "", text)) * 1_000_000
+        return float(re.sub(r"[^\d.]", "", text))
+    
 class LLMReportWriterSkill(Skill):
     name = "llm_report_writer"
     description = "Local-LLM report writer that converts retrieved evidence and calculations into final JSON."

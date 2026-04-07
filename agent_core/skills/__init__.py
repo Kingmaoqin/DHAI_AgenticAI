@@ -5,6 +5,7 @@ from agent_core.skills.builtin import (
     ParserSkill,
     ReportWriterSkill,
     RetrievalSkill,
+    UnitNormalizerSkill, 
 )
 from agent_core.skills.registry import SkillRegistry
 
