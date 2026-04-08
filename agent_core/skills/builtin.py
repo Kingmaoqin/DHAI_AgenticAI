@@ -11,23 +11,30 @@ from agent_core.schemas import Artifact, PlanStep, RunState, TaskSpec
 from agent_core.skills.base import Skill
 
 MOCK_DOCUMENTS = {
-    "expense_policy": {
-        "title": "Office Expense Handbook",
+    "treasury_bulletin_1944_01": {
+        "title": "U.S. Treasury Bulletin, January 1944",
         "text": (
-            "Employees may claim lunch reimbursement up to 50 USD per person. "
-            "Taxi reimbursement requires manager approval. Receipts are required for all claims above 20 USD."
+            "Table: Federal Government Expenditures by Agency. "
+            "Fiscal Year 1934. "
+            "Veterans Administration (includes public works): 507 million dollars. "
+            "Note: excludes revolving funds and transfers to trust fund accounts."
         ),
     },
-    "travel_policy": {
-        "title": "Travel Policy",
+    "treasury_bulletin_1998_12": {
+        "title": "U.S. Treasury Bulletin, December 1998",
         "text": (
-            "Hotel reimbursement is capped at 180 USD per night. Flights above economy require director approval."
+            "Table: U.S. Claims on Foreigners. "
+            "Calendar Year 1995. "
+            "Highest claim on a single country: 103,375 million dollars. "
+            "Note: excludes territories and regional aggregates."
         ),
     },
-    "team_ops": {
-        "title": "Team Operations Guide",
+    "treasury_bulletin_1946_07": {
+        "title": "U.S. Treasury Bulletin, July 1946",
         "text": (
-            "Weekly reports should include blockers, completed tasks, and next actions."
+            "Table: Series E Savings Bonds — Payroll Savings Plans by State. "
+            "August 1945 data. "
+            "Page 42."
         ),
     },
 }
