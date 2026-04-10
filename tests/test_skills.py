@@ -82,3 +82,26 @@ assert extract_table_value(
     "Highest claim on a single country: 103375",
     "Highest claim") == 103375.0
 print("extract_table_value tests passed!")
+# Test NumericVerifier
+from agent_core.core.verifier import NumericVerifier
+from agent_core.schemas import Artifact
+
+verifier = NumericVerifier()
+
+good = Artifact(
+    artifact_id="a1", type="report", producer="test",
+    content={"answer": "The total was 507 million dollars",
+             "summary": "test", "evidence_ids": []})
+
+bad = Artifact(
+    artifact_id="a2", type="report", producer="test",
+    content={"answer": "I don't know",
+             "summary": "test", "evidence_ids": []})
+
+ok, msg = verifier.verify(good)
+assert ok == True, f"Expected pass but got: {msg}"
+
+ok, msg = verifier.verify(bad)
+assert ok == False, f"Expected fail but got: {msg}"
+
+print("NumericVerifier tests passed!")
