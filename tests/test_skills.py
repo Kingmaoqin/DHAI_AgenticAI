@@ -1,5 +1,7 @@
 from agent_core.skills.builtin import CalculatorSkill, RetrievalSkill
 from agent_core.schemas import Artifact, PlanStep, RunState, TaskSpec
+from agent_core.skills.extractors import extract_number, extract_date, extract_table_value
+
 import uuid
 
 def make_step(expected_artifact):
@@ -56,3 +58,27 @@ result2 = retrieval_skill.run(step2, None, run_state2)
 assert result2.type == "retrieval_result"
 assert "treasury" in result2.content["doc_id"]
 print("RetrievalSkill tests passed!")
+
+# Test extract_number
+assert extract_number("Veterans Administration: 507 million dollars") == 507_000_000.0
+assert extract_number("Highest claim: 103,375 million dollars") == 103_375_000_000.0
+assert extract_number("Page 42") == 42.0
+assert extract_number("3.5 percent") == 0.035
+assert extract_number("1.2 billion") == 1_200_000_000.0
+print("extract_number tests passed!")
+
+# Test extract_date
+assert extract_date("January 1985")       == (1985, 1)
+assert extract_date("December 1998")      == (1998, 12)
+assert extract_date("Fiscal Year 1934")   == (1934, None)
+assert extract_date("Calendar Year 1995") == (1995, None)
+print("extract_date tests passed!")
+
+# Test extract_table_value
+assert extract_table_value(
+    "Veterans Administration (includes public works): 507",
+    "Veterans Administration") == 507.0
+assert extract_table_value(
+    "Highest claim on a single country: 103375",
+    "Highest claim") == 103375.0
+print("extract_table_value tests passed!")
