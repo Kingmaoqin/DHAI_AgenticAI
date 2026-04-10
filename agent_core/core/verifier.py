@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from agent_core.schemas import Artifact, RunState, TaskSpec
 
+import re
+
 
 class SchemaVerifier:
     REQUIRED_FIELDS = ("answer", "summary", "evidence_ids")
@@ -34,3 +36,14 @@ class EvidenceVerifier:
             if artifact_id not in run_state.artifacts:
                 return False, f"unknown evidence artifact: {artifact_id}"
         return True, "evidence ok"
+
+
+class NumericVerifier:
+    def verify(self, artifact: Artifact) -> tuple[bool, str]:
+        answer = artifact.content.get("answer", "")
+        if not isinstance(answer, str):
+            return False, "answer is not a string"
+        # check if answer contains any digit
+        if not re.search(r"\d", answer):
+            return False, "answer contains no numeric value"
+        return True, "numeric check ok"
