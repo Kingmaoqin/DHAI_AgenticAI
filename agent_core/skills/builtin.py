@@ -314,17 +314,31 @@ class UnitNormalizerSkill(Skill):
             confidence=1.0,
         )
 
-    def _normalize(self, text: str) -> float:
+    def _normalize(self, text: str) -> float | None:
         text = text.strip().lower().replace(",", "").replace("$", "")
+        cleaned = re.sub(r"[^\d.]", "", text)
+
+        if not cleaned or cleaned.count(".") > 1:  # ← fix problem 2
+            return None
+
+        number = float(cleaned)
+
         if "%" in text:
-            return float(re.sub(r"[^\d.]", "", text)) / 100
-        if "trillion" in text or text.endswith("t"):
-            return float(re.sub(r"[^\d.]", "", text)) * 1_000_000_000_000
-        if "billion" in text or text.endswith("b"):
-            return float(re.sub(r"[^\d.]", "", text)) * 1_000_000_000
-        if "million" in text or text.endswith("m"):
-            return float(re.sub(r"[^\d.]", "", text)) * 1_000_000
-        return float(re.sub(r"[^\d.]", "", text))
+            return number / 100
+        if "trillion" in text:                          # ← fix problem 1
+            return number * 1_000_000_000_000
+        if "billion" in text:                           # ← fix problem 1
+            return number * 1_000_000_000
+        if "million" in text:                           # ← fix problem 1
+            return number * 1_000_000
+        if re.search(r"[\d.]+\s*t\b", text):            # ← shorthand T
+            return number * 1_000_000_000_000
+        if re.search(r"[\d.]+\s*b\b", text):            # ← shorthand B
+            return number * 1_000_000_000
+        if re.search(r"[\d.]+\s*m\b", text):            # ← shorthand M
+            return number * 1_000_000
+
+        return number    
     
 class LLMReportWriterSkill(Skill):
     name = "llm_report_writer"
